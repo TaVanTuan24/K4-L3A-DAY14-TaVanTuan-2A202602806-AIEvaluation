@@ -242,15 +242,81 @@ class TextGenerator(Protocol):
     def generate(self, prompt: str) -> str: ...
 
 
+# ---------------------------------------------------------------------------
+# Generation providers
+# ---------------------------------------------------------------------------
+# AI_PROVIDER selects the generation backend. Only the generator layer changes;
+# retrieval, prompt and artifact schema are identical for every provider.
+
+PROVIDER_ENV = "AI_PROVIDER"
+PROVIDER_OPENAI = "openai"
+PROVIDER_COMPATIBLE = "compatible"
+SUPPORTED_PROVIDERS = (PROVIDER_OPENAI, PROVIDER_COMPATIBLE)
+# Unset AI_PROVIDER keeps the original behaviour (official OpenAI).
+DEFAULT_PROVIDER = PROVIDER_OPENAI
+
+OPENAI_ENV = ("OPENAI_API_KEY", "OPENAI_MODEL")
+COMPATIBLE_ENV = (
+    "OPENAI_COMPATIBLE_BASE_URL",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "OPENAI_COMPATIBLE_MODEL",
+)
+# Environment variables whose values must never appear in errors or logs.
+SECRET_ENV = ("OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY")
+
+
+def _read_required_env(names: Sequence[str], provider: str) -> dict[str, str]:
+    """Read required variables; report every missing name (never the values)."""
+
+    values = {name: os.getenv(name, "").strip() for name in names}
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        raise RuntimeError(
+            f"{', '.join(missing)} {verb} missing from .env "
+            f"(required when {PROVIDER_ENV}={provider})"
+        )
+    return values
+
+
+def normalize_base_url(raw_url: str) -> str:
+    """Trim whitespace and trailing slashes; never append or rewrite paths.
+
+    ``https://example.com/v1/`` → ``https://example.com/v1``. The URL itself is
+    not echoed in errors because it may point to an internal endpoint.
+    """
+
+    url = raw_url.strip().rstrip("/")
+    if not re.match(r"^https?://[^/\s]+", url, flags=re.IGNORECASE):
+        raise RuntimeError(
+            "OPENAI_COMPATIBLE_BASE_URL must be an absolute http:// or https:// URL "
+            "(for example https://example.com/v1)"
+        )
+    return url
+
+
+def get_provider() -> str:
+    """Return the configured provider name (case-insensitive, default openai)."""
+
+    raw_provider = os.getenv(PROVIDER_ENV, "").strip()
+    provider = raw_provider.lower() or DEFAULT_PROVIDER
+    if provider not in SUPPORTED_PROVIDERS:
+        raise RuntimeError(
+            f"Unsupported {PROVIDER_ENV}: {raw_provider}. "
+            f"Supported values: {', '.join(SUPPORTED_PROVIDERS)}"
+        )
+    return provider
+
+
 class OpenAIGenerator:
+    """Official OpenAI backend (Responses API) — unchanged original behaviour."""
+
+    provider = PROVIDER_OPENAI
+
     def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
-        if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+        env = _read_required_env(OPENAI_ENV, PROVIDER_OPENAI)
+        self.model = env["OPENAI_MODEL"]
+        self.client = OpenAI(api_key=env["OPENAI_API_KEY"])
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
@@ -260,10 +326,84 @@ class OpenAIGenerator:
             temperature=0,
             max_output_tokens=self.max_output_tokens,
         )
-        answer = response.output_text.strip()
+        answer = (response.output_text or "").strip()
         if not answer:
             raise RuntimeError("OpenAI returned an empty answer")
         return answer
+
+
+class OpenAICompatibleGenerator:
+    """Any server exposing an OpenAI-compatible Chat Completions endpoint
+    (local gateway, self-hosted server, proxy, or third-party provider).
+
+    Uses ``chat.completions`` rather than the Responses API because many
+    compatible servers do not implement ``/responses``.
+    """
+
+    provider = PROVIDER_COMPATIBLE
+
+    def __init__(self, max_output_tokens: int = 300) -> None:
+        # Reads only OPENAI_COMPATIBLE_* — never falls back to OPENAI_API_KEY/MODEL.
+        env = _read_required_env(COMPATIBLE_ENV, PROVIDER_COMPATIBLE)
+        self.model = env["OPENAI_COMPATIBLE_MODEL"]
+        self.client = OpenAI(
+            api_key=env["OPENAI_COMPATIBLE_API_KEY"],
+            base_url=normalize_base_url(env["OPENAI_COMPATIBLE_BASE_URL"]),
+        )
+        self.max_output_tokens = max_output_tokens
+
+    def generate(self, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=self.max_output_tokens,
+        )
+        return _extract_chat_content(response)
+
+
+def _extract_chat_content(response: Any) -> str:
+    """Safely read ``choices[0].message.content`` from a chat completion."""
+
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise RuntimeError("OpenAI-compatible API returned no choices")
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if content is None:
+        raise RuntimeError("OpenAI-compatible API returned an empty answer (content is None)")
+    if not isinstance(content, str):
+        raise RuntimeError(
+            "OpenAI-compatible API returned non-text content "
+            f"({type(content).__name__})"
+        )
+    answer = content.strip()
+    if not answer:
+        raise RuntimeError("OpenAI-compatible API returned an empty answer")
+    return answer
+
+
+def create_generator(max_output_tokens: int = 300) -> TextGenerator:
+    """Build the generator selected by ``AI_PROVIDER``.
+
+    openai     → OpenAIGenerator            (OPENAI_API_KEY, OPENAI_MODEL)
+    compatible → OpenAICompatibleGenerator  (OPENAI_COMPATIBLE_*)
+    """
+
+    provider = get_provider()
+    if provider == PROVIDER_COMPATIBLE:
+        return OpenAICompatibleGenerator(max_output_tokens)
+    return OpenAIGenerator(max_output_tokens)
+
+
+def redact_secrets(message: str) -> str:
+    """Replace any configured API key value in ``message`` with ``***``."""
+
+    for name in SECRET_ENV:
+        secret = os.getenv(name, "").strip()
+        if secret:
+            message = message.replace(secret, "***")
+    return message
 
 
 @dataclass(frozen=True)
@@ -299,7 +439,8 @@ class DomainAssistant:
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            # Injected generators bypass provider env entirely (offline tests).
+            generator if generator is not None else create_generator(),
             top_k,
         )
 
@@ -399,10 +540,12 @@ def generate_actual_answers(
         )
 
     model = getattr(assistant.generator, "model", assistant.generator.__class__.__name__)
+    # Only provider + model are recorded — never API keys or base URLs.
+    provider = getattr(assistant.generator, "provider", "custom")
     total = len(questions)
     notify(
         f"Ready: {total} questions, {len(assistant.retriever.chunks)} chunks, "
-        f"model={model}, top_k={top_k}"
+        f"provider={provider}, model={model}, top_k={top_k}"
     )
 
     answers: list[dict[str, Any]] = []
@@ -458,6 +601,7 @@ def generate_actual_answers(
         "generated_at": datetime.now(UTC).isoformat(),
         "agent": {
             "name": "domain-assistant",
+            "provider": provider,
             "model": model,
             "top_k": top_k,
             "prompt_version": "1.0",
@@ -509,7 +653,8 @@ def main() -> int:
             encoding="utf-8",
         )
     except (OSError, OpenAIError, TypeError, ValueError, RuntimeError) as exc:
-        print(f"ERROR: {exc}")
+        # SDK/server errors may echo credentials; mask configured keys.
+        print(f"ERROR: {redact_secrets(str(exc))}")
         return 2
     print(f"Generated {len(artifact['answers'])} actual answers: {output}")
     return 0

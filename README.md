@@ -36,17 +36,40 @@ Hạn nộp mặc định: **23h59 ngày lab (GMT+7)**; coach có thể gia hạ
 
 ## Yêu cầu & Quick Start
 
-**Yêu cầu:** Python 3.11 trở lên. Cần **OpenAI API key** để chạy `domain_assistant.py` (Part 3 — sinh 20 actual answers từ RAG thật); phần code core (`template.py`, Part 1–2) không cần API key.
+**Yêu cầu:** Python 3.11 trở lên. Cần **API key của OpenAI hoặc của một OpenAI-compatible API** để chạy `domain_assistant.py` (Part 3 — sinh 20 actual answers từ RAG thật); phần code core (`template.py`, Part 1–2) không cần API key.
 
 ```bash
 python --version                                        # xác nhận Python 3.11+
 python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 pytest tests/ -v                                         # baseline: 42 tests collected, 42 failed
-cp .env.example .env                                     # điền OPENAI_API_KEY (chỉ cần cho Part 3)
+cp .env.example .env                                     # chọn AI_PROVIDER và điền key (chỉ cần cho Part 3)
 ```
 
 Chi tiết hướng dẫn theo hệ điều hành và xử lý lỗi: xem [`guide_lab.md`](guide_lab.md).
+
+### Cấu hình generation provider
+
+`domain_assistant.py` chọn backend sinh câu trả lời qua biến `AI_PROVIDER` trong `.env`. Chỉ cần điền biến của provider đang dùng. Retrieval, prompt, evaluation và schema artifact giống nhau cho mọi provider.
+
+OpenAI chính thức (mặc định khi không đặt `AI_PROVIDER`):
+
+```dotenv
+AI_PROVIDER=openai
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-4o-mini
+```
+
+OpenAI-compatible API, tức là bất kỳ server nào có endpoint `/chat/completions` tương thích OpenAI: local gateway, self-hosted server, proxy hoặc provider khác:
+
+```dotenv
+AI_PROVIDER=compatible
+OPENAI_COMPATIBLE_BASE_URL=http://localhost:8000/v1
+OPENAI_COMPATIBLE_API_KEY=...
+OPENAI_COMPATIBLE_MODEL=...
+```
+
+Chế độ `compatible` chỉ đọc các biến `OPENAI_COMPATIBLE_*` và không dùng `OPENAI_API_KEY`/`OPENAI_MODEL`. Base URL được dùng nguyên văn (chỉ bỏ khoảng trắng và dấu `/` cuối), nên hãy ghi đầy đủ, kể cả `/v1` nếu server yêu cầu. Artifact `actual_answers.json` chỉ ghi `provider` và `model`, không ghi API key hay base URL.
 
 ---
 

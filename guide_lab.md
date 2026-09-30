@@ -13,7 +13,7 @@ khi golden dataset validate thành công.
 `domain_assistant.py` là RAG assistant cho OrbitTech Store Customer Support:
 
 ```text
-question → BM25 retrieval → retrieved chunks → OpenAI model → actual answer
+question → BM25 retrieval → retrieved chunks → OpenAI / OpenAI-compatible model → actual answer
 ```
 
 Đây là thành phần **sinh câu trả lời thật**.
@@ -552,9 +552,10 @@ sinh actual answers và làm Exercise 3.2.
 
 ---
 
-## 7. Cấu hình OpenAI API
+## 7. Cấu hình Generation Provider (OpenAI hoặc OpenAI-compatible)
 
-Chỉ `domain_assistant.py` cần API key.
+Chỉ `domain_assistant.py` cần API key. Biến `AI_PROVIDER` chọn backend sinh câu
+trả lời; retrieval BM25, prompt, evaluation và schema artifact không đổi.
 
 macOS/Linux:
 
@@ -568,12 +569,40 @@ Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-Mở `.env` và điền:
+Mở `.env`, chọn **một** provider và điền biến của provider đó (block còn lại
+có thể để placeholder).
+
+**Option A — OpenAI chính thức** (mặc định nếu không đặt `AI_PROVIDER`):
 
 ```dotenv
+AI_PROVIDER=openai
 OPENAI_API_KEY=<API_KEY_CUA_BAN>
 OPENAI_MODEL=gpt-4o-mini
 ```
+
+**Option B — OpenAI-compatible API.** Dùng khi không có OpenAI key. Đó có thể
+là local gateway, self-hosted server, proxy hoặc provider khác có endpoint
+`/chat/completions` tương thích OpenAI:
+
+```dotenv
+AI_PROVIDER=compatible
+OPENAI_COMPATIBLE_BASE_URL=http://localhost:8000/v1
+OPENAI_COMPATIBLE_API_KEY=<API_KEY_CUA_BAN>
+OPENAI_COMPATIBLE_MODEL=<TEN_MODEL>
+```
+
+Lưu ý:
+
+- `compatible` chỉ đọc `OPENAI_COMPATIBLE_*`, không dùng `OPENAI_API_KEY` /
+  `OPENAI_MODEL`.
+- Base URL được dùng nguyên văn (chỉ trim khoảng trắng và `/` cuối), không tự
+  thêm `/v1`. Hãy ghi URL đầy đủ theo tài liệu của server.
+- Chế độ này gọi Chat Completions API thay vì Responses API vì nhiều server
+  compatible chưa hỗ trợ `/responses`.
+- `artifacts/actual_answers.json` ghi `agent.provider` và `agent.model`, không
+  ghi API key hay base URL.
+- Giá trị `AI_PROVIDER` khác `openai`/`compatible` sẽ báo
+  `Unsupported AI_PROVIDER: ...`.
 
 `.env` đã nằm trong `.gitignore`. Không paste key vào source code, notebook,
 artifact, terminal screenshot hoặc commit.
@@ -805,6 +834,9 @@ environment đã được activate.
 | Validator liệt kê nhiều field rỗng | `golden_dataset.json` vẫn là form starter | Điền đủ 20 records; đây là lỗi mong đợi trước Exercise 3.1 |
 | `text is not a verbatim substring` | Evidence đã bị sửa wording/punctuation | Copy lại nguyên văn đoạn ngắn từ đúng `source_doc` |
 | `OPENAI_API_KEY is missing from .env` | Thiếu `.env`, key còn placeholder, hoặc chạy sai directory | Copy `.env.example` thành `.env`, điền key thật và chạy từ repo root |
+| `OPENAI_COMPATIBLE_... is missing from .env (required when AI_PROVIDER=compatible)` | Chọn `compatible` nhưng thiếu base URL / key / model | Điền đủ 3 biến `OPENAI_COMPATIBLE_*` trong `.env` |
+| `Unsupported AI_PROVIDER: ...` | Giá trị `AI_PROVIDER` sai chính tả | Dùng `openai` hoặc `compatible` |
+| `404` / `Not Found` khi dùng `compatible` | Base URL thiếu hoặc thừa `/v1` | Ghi đúng base URL theo tài liệu server (vd. `http://localhost:8000/v1`) |
 | `Dataset corpus_id ... does not match assistant corpus_id` | Đã sửa nhầm `corpus_id` | Khôi phục `orbittech-customer-support-v1` |
 | `question differs between artifacts` | Golden dataset đã đổi sau lần sinh answers | Validate rồi chạy lại `python domain_assistant.py` để tạo artifact mới |
 | `Complete the required TODOs in template.py first` | Core còn `NotImplementedError` | Quay lại checkpoint test tương ứng ở Mục 4.9 |
