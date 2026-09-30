@@ -30,11 +30,11 @@ critical.
 
 | Metric | Acceptable Low Score Scenario | Critical Low Score Scenario | Action Required |
 |---|---|---|---|
-| Faithfulness | | | |
-| Answer Relevance | | | |
-| Context Recall | | | |
-| Context Precision | | | |
-| Completeness | | | |
+| Faithfulness | Answer đúng policy nhưng diễn đạt khác source ("12 months" vs "12-month"), hoặc thêm chi tiết đúng lấy từ một chunk được retrieve khác gold. Word-overlap chấm thấp dù không có claim bịa | Answer chứa số tiền, số ngày, phí, quyền lợi hoặc policy version không có trong source. Ví dụ hứa "you will not be charged" khi corpus quy định USD 35 diagnostic fee, hoặc xác nhận "36-month OrbitPlus warranty" | Đọc claim-by-claim so với retrieved contexts. Nếu có claim unsupported về tiền/quyền lợi thì chặn deploy, thêm instruction "chỉ nêu amount/date có trong context" và claim-level checker. Nếu chỉ là paraphrase thì ghi nhận là giới hạn của metric |
+| Answer Relevance | Câu từ chối đúng cho prompt injection hoặc out-of-scope. Answer không lặp lại từ ngữ của attacker ("admin mode", "override") nên overlap với question thấp, nhưng behavior đúng | Answer grounded nhưng trả lời sai intent. Ví dụ khách hỏi cách xử lý account bị xâm nhập, assistant lại chỉ giải thích quy trình card fraud, hoặc bỏ hẳn một phần của câu hỏi nhiều phần | Kiểm tra bằng judge hoặc human xem answer có giải quyết đúng intent không. Nếu sai intent thì sửa prompt để trả lời từng phần câu hỏi, và thêm query rewriting/intent routing. Chấm adversarial bằng behavioral check thay vì lexical relevance |
+| Context Recall | Câu hỏi out-of-scope mà corpus không có đáp án, hoặc expected answer có phần lời dẫn/diễn giải không cần evidence. Chunks vẫn chứa đủ các fact quyết định | Chunk chứa rule quyết định không vào top-k. Ví dụ exclusions và diagnostic fee cho case rơi vỡ, hoặc các bước xử lý account compromise. Generator khi đó phải đoán | Xem thứ hạng của gold chunk trong BM25. Thêm synonym/query expansion (dropped → accidental impact, hacked → account compromise), hybrid dense + BM25, cân nhắc tăng top_k sau khi đo lại. Thêm case paraphrase vào benchmark |
+| Context Precision | Recall vẫn cao và evidence chính nằm trong top-1/top-2. Noise chỉ đứng ở vị trí cuối, không làm answer sai | Noise chunks (catalog, policy khác) đứng trước evidence quan trọng, đẩy nó xuống dưới hoặc ra khỏi top-k. Generator trả lời theo chunk sai (return policy thay vì warranty) | Thêm reranking (cross-encoder hoặc lexical rerank), giảm trọng số title/tên sản phẩm, xem lại chunk boundaries. Đo lại Precision cùng với Recall để chắc reranking không làm mất evidence |
+| Completeness | Reference có phần giải thích phụ mà câu trả lời ngắn không nhắc, nhưng mọi condition quyết định vẫn đúng. Hoặc answer paraphrase đúng ý nhưng khác từ | Bỏ sót condition hoặc exception làm đổi quyết định của khách. Ví dụ thiếu 15% restocking fee, thiếu "chỉ khi OrbitPlus active vào ngày đặt hàng", thiếu "gift card không trả được 25% đầu", hoặc thiếu bước "cancel khi status còn `Confirmed`" | Kiểm tra theo checklist các condition trong reference. Nếu thiếu do retrieval thì sửa retrieval trước. Nếu context đã đủ thì thêm instruction "answer every part, keep exceptions" và few-shot cho câu nhiều điều kiện |
 
 ### Exercise 1.2 — Bias trong LLM-as-a-Judge
 
@@ -46,15 +46,54 @@ Ba bias thường gặp:
 
 **Câu 1: Thiết kế experiment phát hiện position bias với ít nhất hai conditions.**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Lấy N cặp answer (vd. 20 questions của golden set, mỗi
+> question có answer X từ baseline và answer Y từ phiên bản mới) và cho judge
+> chấm pairwise theo hai điều kiện:
+>
+> - **Condition A:** Answer X đứng trước, Answer Y đứng sau.
+> - **Condition B:** Answer Y đứng trước, Answer X đứng sau.
+>
+> Giữ nguyên mọi thứ khác: question, nội dung hai answers, rubric, judge model,
+> temperature = 0 và cấu hình prompt. Chỉ đổi vị trí. Với mỗi cặp, so kết quả
+> của cùng một answer ở hai conditions. Nếu judge không bias thì answer thắng ở A
+> cũng phải thắng ở B. Nếu một answer được điểm cao hơn **khi đứng trước** và
+> thua khi đứng sau, đó là dấu hiệu position bias. Đo tỷ lệ "first-position win"
+> trên toàn bộ N cặp: không bias thì khoảng 50%, lệch rõ (vd. > 65%) là có bias.
+> Có thể thêm **Condition C** (X vs X, hai bản giống hệt nhau): judge không bias
+> phải cho hòa. Cần chạy nhiều cặp và nhiều loại case (easy, policy, adversarial),
+> vì một cặp đơn lẻ không phân biệt được bias với khác biệt chất lượng thật.
 
 **Câu 2: Làm thế nào giảm verbosity bias bằng rubric design?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Rubric chấm theo **nội dung đúng và có nguồn**, không theo độ
+> dài:
+> (1) Chấm Correctness, Completeness và Groundedness theo checklist
+> condition/exception của reference và theo nhãn từng claim (supported /
+> unsupported / contradicted).
+> (2) Ghi rõ "không cộng điểm vì dài". Claim thừa nhưng đúng không được thưởng.
+> Claim thừa mà sai hoặc không có nguồn thì bị trừ Groundedness.
+> (3) Thêm tiêu chí conciseness/relevance: answer phải trả lời trực tiếp câu hỏi
+> trước, và thông tin không được hỏi làm lu mờ ý chính thì bị trừ.
+> (4) Calibration set có cặp "ngắn-đúng" và "dài-có-một-claim-sai". Judge phải xếp
+> answer ngắn cao hơn, nếu không thì chỉnh prompt judge.
+> Ví dụ OrbitTech: một câu trả lời liệt kê thêm loaner và 45-day window khi khách
+> chỉ hỏi giá OrbitPlus không được điểm cao hơn câu trả lời ngắn nêu đúng USD 49
+> và ba benefit.
 
 **Câu 3: Tại sao cần calibrate LLM judge với human labels?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* LLM judge có thể lệch **có hệ thống**: dễ dãi với answer trôi
+> chảy, khắt khe với refusal, thích output giống model của nó. Thang điểm của nó
+> cũng không tự nhiên trùng với người chấm, "4/5" của model chưa chắc bằng "4/5"
+> của một support lead. Vì vậy cần một **human-labeled subset** (vd. ≥ 20% cases,
+> đủ các difficulty và adversarial, do người hiểu policy OrbitTech chấm độc lập
+> theo cùng rubric) làm reference. Sau đó đo agreement giữa judge và human:
+> **Cohen's kappa** cho nhãn pass/fail hoặc 1–5 (đo đồng thuận đã loại phần trùng
+> ngẫu nhiên), hoặc Spearman correlation cho điểm liên tục. Nếu agreement thấp
+> (vd. κ < 0.6), xem các case lệch để tìm nguyên nhân: rubric mơ hồ, judge bỏ qua
+> hard cap về privacy, bị ảnh hưởng bởi độ dài. Sửa rubric/prompt judge rồi đo lại
+> trước khi dùng điểm judge làm quality gate. Calibration cần làm lại khi đổi
+> judge model hoặc khi policy thay đổi.
 
 ### Exercise 1.3 — Evaluation trong CI/CD
 
@@ -62,13 +101,37 @@ Ba bias thường gặp:
 
 | Metric | Threshold | Lý do |
 |---|---:|---|
-| Faithfulness | | |
-| Answer Relevance | | |
-| Completeness | | |
+| Faithfulness | 0.70 | Nghiêm trọng nhất với customer support: một policy, phí, hạn đổi trả hoặc quyền bảo hành bị bịa có thể làm khách mất tiền/quyền lợi và tạo cam kết sai cho OrbitTech. Bám mốc lecture "faithfulness < 0.7 → không được deploy". Ngoài average, **bất kỳ claim contradicted nào ở case critical (fees, refunds, privacy) đều block**, không phụ thuộc trung bình |
+| Answer Relevance | 0.65 | Relevance thấp nghĩa là answer không giải quyết intent của khách (hỏi account compromise nhưng được trả lời về card fraud), dẫn tới ticket lặp lại hoặc escalation. Thấp hơn Faithfulness một chút vì ít rủi ro tài chính hơn và vì refusal đúng có thể bị chấm thấp. Adversarial cases được chấm bằng behavioral check riêng |
+| Completeness | 0.65 | Policy OrbitTech nhiều điều kiện/exception (version theo ngày đặt, OrbitPlus active vào ngày đặt, restocking fee, gift card không trả 25%). Thiếu một condition có thể đổi quyết định của khách, nên phải chặn, nhưng cho phép answer ngắn gọn bỏ phần diễn giải phụ |
+
+Ghi chú: các ngưỡng tuyệt đối này áp dụng cho metric semantic/judge-based đã
+calibrate. Với word-overlap heuristic của lab (baseline Faithfulness 0.418 do
+phạt paraphrase, xem `reflection.md` mục 5), gate thực tế nên dựa trên
+regression so với baseline (drop > 0.05) cộng với behavioral/safety assertions.
+Nếu không, mọi lần deploy đều bị block vì giới hạn của thước đo.
 
 **Câu 2: Khi nào dùng offline evaluation, online evaluation và human review?**
 
 > *Câu trả lời:*
+>
+> - **Offline evaluation (trước deploy):** chạy trên golden dataset cố định (20
+>   cases, có gold evidence) mỗi khi đổi prompt, model/provider, retrieval
+>   (tokenizer, top_k, chunking) hoặc corpus policy. Dùng để so với baseline
+>   bằng `run_regression()` và làm quality gate trong CI. Ưu điểm: rẻ, lặp lại
+>   được, so sánh công bằng. Nhược điểm: chỉ đo các câu hỏi đã biết.
+> - **Online evaluation (sau deploy):** theo dõi production traffic thật: latency,
+>   error rate, tỷ lệ escalation sang human agent, tỷ lệ khách mở lại ticket,
+>   thumbs up/down, và lấy mẫu answer để chấm faithfulness bằng judge. Mục tiêu
+>   là phát hiện drift: khách hỏi kiểu mới ("hacked", "smashed screen"), policy
+>   version mới, provider đổi hành vi. Case mới phát hiện được đưa ngược vào golden
+>   set.
+> - **Human review:** dùng cho case rủi ro cao mà metric tự động không đủ tin
+>   cậy: privacy/security (lộ data khách khác, account compromise), tiền và quyền
+>   lợi (refund, phí, warranty), policy mơ hồ theo effective date, output
+>   adversarial (prompt injection, false premise), và khi metrics/judges bất đồng
+>   (vd. word-overlap chấm fail nhưng judge chấm 5). Human review còn là nguồn
+>   label để calibrate LLM judge định kỳ.
 
 ---
 
